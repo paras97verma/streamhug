@@ -147,7 +147,7 @@ class FFprobeService:
             elif codec_type == "subtitle":
                 codec = stream.get("codec_name", "")
                 # Only expose text-based subtitle formats that can be converted to WebVTT
-                if codec in ("subrip", "ass", "ssa", "mov_text", "webvtt", "dvd_subtitle"):
+                if codec in ("subrip", "ass", "ssa", "mov_text", "webvtt", "srt", "vtt"):
                     subtitle_tracks.append(SubtitleTrack(
                         index=stream.get("index", len(subtitle_tracks)),
                         language=tags.get("language", tags.get("LANGUAGE", "")),
