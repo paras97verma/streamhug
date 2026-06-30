@@ -1,6 +1,13 @@
-# Media and cache
-media/
-logs/
+media/originals/Movies/*
+!media/originals/Movies/.gitkeep
+media/originals/TV Shows/*
+!media/originals/TV Shows/.gitkeep
+media/originals/Anime/*
+!media/originals/Anime/.gitkeep
+media/cache/*
+!media/cache/.gitkeep
+logs/*
+!logs/.gitkeep
 auth.sqlite3
 .env
 backend/.env
