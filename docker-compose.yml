@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: streamhug-backend
+    environment:
+      - PORT=8080
+      - API_VERSION=v1
+      - SCAN_ON_STARTUP=True
+      - MEDIA_ROOT=/media/originals
+      - CACHE_ROOT=/media/cache
+      - LOG_DIR=/logs
+      - HLS_MAX_CONCURRENT_TRANSCODES=${HLS_MAX_CONCURRENT_TRANSCODES:-4}
+      - TUNNEL_ENABLED=False
+    volumes:
+      - ./media:/media
+      - ./logs:/logs
+      - ./auth.sqlite3:/app/auth.sqlite3
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: streamhug-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  zrok:
+    image: openziti/zrok
+    container_name: streamhug-zrok
+    volumes:
+      - zrok-state:/home/zrok/.zrok
+    environment:
+      - ZROK_ENABLE_TOKEN=${ZROK_ENABLE_TOKEN}
+    entrypoint: |
+      sh -c "
+      if [ ! -d /home/zrok/.zrok ] || [ ! -f /home/zrok/.zrok/environment.json ]; then
+        if [ -z \"$$ZROK_ENABLE_TOKEN\" ]; then
+          echo 'ERROR: ZROK_ENABLE_TOKEN environment variable is not set.'
+          echo 'Please set ZROK_ENABLE_TOKEN in your .env file.'
+          exit 1
+        fi
+        zrok enable $$ZROK_ENABLE_TOKEN
+      fi
+      zrok share public http://frontend:3000 --backend-mode proxy --headless
+      "
+    restart: unless-stopped
+
+volumes:
+  zrok-state:

@@ -1,0 +1,178 @@
+/* ───────────────────────────────────────────────────────────────────────────
+   StreamHug — Dark Neumorphism Design System
+   Base: #0f1117 (deep navy-dark)
+   Neumorphic shadows: convex outset = light top-left + dark bottom-right
+   Accent: Electric Violet #7c3aed / Indigo-Purple glow
+─────────────────────────────────────────────────────────────────────────── */
+
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600&display=swap');
+
+:root {
+  /* ── Base palette ─────────────────────────────────────────────────── */
+  --neu-base:    #12151f;   /* main surface */
+  --neu-dark:    #0b0e17;   /* shadow dark side */
+  --neu-light:   #1a1f31;   /* shadow light side */
+  --neu-mid:     #161a27;   /* inset surface */
+  --neu-border:  rgba(255, 255, 255, 0.04);
+
+  /* ── Accent ───────────────────────────────────────────────────────── */
+  --accent:        #7c3aed;
+  --accent-light:  #a78bfa;
+  --accent-glow:   rgba(124, 58, 237, 0.35);
+  --accent-subtle: rgba(124, 58, 237, 0.08);
+
+  /* ── Text ─────────────────────────────────────────────────────────── */
+  --text-primary:  #e8e8f0;
+  --text-secondary:#9699b0;
+  --text-muted:    #5a5e72;
+  --text-inverse:  #ffffff;
+
+  /* ── Neumorphic shadows ───────────────────────────────────────────── */
+  --shadow-outset:    8px 8px 20px var(--neu-dark), -4px -4px 14px var(--neu-light);
+  --shadow-inset:     inset 4px 4px 12px var(--neu-dark), inset -3px -3px 8px var(--neu-light);
+  --shadow-card:      6px 6px 16px var(--neu-dark), -3px -3px 10px var(--neu-light);
+  --shadow-card-hover:10px 10px 28px var(--neu-dark), -5px -5px 16px var(--neu-light);
+  --shadow-btn:       4px 4px 10px var(--neu-dark), -2px -2px 6px var(--neu-light);
+  --shadow-btn-press:  inset 3px 3px 8px var(--neu-dark), inset -2px -2px 5px var(--neu-light);
+  --shadow-glow:      0 0 24px var(--accent-glow);
+
+  /* ── Misc ─────────────────────────────────────────────────────────── */
+  --radius-sm:   10px;
+  --radius-md:   16px;
+  --radius-lg:   22px;
+  --radius-xl:   30px;
+  --radius-pill: 999px;
+
+  --transition-normal: 0.28s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --transition-fast:   0.14s ease-in-out;
+  --transition-slow:   0.45s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Kept for backward compat with existing components */
+  --bg-color:        var(--neu-base);
+  --card-bg:         var(--neu-mid);
+  --brand-color:     var(--accent);
+  --brand-hover:     var(--accent-light);
+  --text-color:      var(--text-primary);
+  --font-family:     'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --header-bg:       rgba(12, 15, 23, 0.85);
+  --skeleton-base:      var(--neu-mid);
+  --skeleton-highlight: var(--neu-light);
+}
+
+/* ── Reset ──────────────────────────────────────────────────────────────── */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-family);
+  background-color: var(--neu-base);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  line-height: 1.6;
+}
+
+a { color: inherit; text-decoration: none; }
+ul { list-style: none; }
+
+button {
+  font-family: inherit;
+  border: none;
+  cursor: pointer;
+  background: none;
+}
+
+/* ── Neumorphic utility classes ─────────────────────────────────────────── */
+.neu-raised {
+  background: var(--neu-base);
+  box-shadow: var(--shadow-outset);
+  border-radius: var(--radius-md);
+}
+
+.neu-inset {
+  background: var(--neu-mid);
+  box-shadow: var(--shadow-inset);
+  border-radius: var(--radius-md);
+}
+
+.neu-card {
+  background: var(--neu-base);
+  box-shadow: var(--shadow-card);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--neu-border);
+  transition: box-shadow var(--transition-normal), transform var(--transition-normal);
+}
+
+.neu-card:hover {
+  box-shadow: var(--shadow-card-hover), 0 0 0 1px rgba(124,58,237,0.12);
+  transform: translateY(-3px);
+}
+
+.neu-btn {
+  background: var(--neu-base);
+  box-shadow: var(--shadow-btn);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--neu-border);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-weight: 600;
+  transition: box-shadow var(--transition-fast), transform var(--transition-fast), color var(--transition-fast);
+}
+
+.neu-btn:hover {
+  box-shadow: var(--shadow-outset), var(--shadow-glow);
+  color: var(--accent-light);
+}
+
+.neu-btn:active {
+  box-shadow: var(--shadow-btn-press);
+  transform: scale(0.97);
+}
+
+.neu-btn-accent {
+  background: linear-gradient(135deg, var(--accent) 0%, #5b21b6 100%);
+  box-shadow: var(--shadow-btn), 0 4px 20px var(--accent-glow);
+  color: white;
+  border: none;
+}
+
+.neu-btn-accent:hover {
+  box-shadow: var(--shadow-outset), 0 6px 28px var(--accent-glow);
+  transform: translateY(-1px);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--neu-dark); }
+::-webkit-scrollbar-thumb { background: #2a2e42; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #363c58; }
+
+/* ── Skeleton loading ───────────────────────────────────────────────────── */
+@keyframes skeleton-loading {
+  0%   { background-color: var(--skeleton-base); }
+  50%  { background-color: var(--skeleton-highlight); }
+  100% { background-color: var(--skeleton-base); }
+}
+
+.skeleton {
+  animation: skeleton-loading 1.5s infinite ease-in-out;
+  border-radius: var(--radius-sm);
+}
+
+/* ── Accent glow pulse ──────────────────────────────────────────────────── */
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 10px var(--accent-glow); }
+  50%       { box-shadow: 0 0 24px var(--accent-glow), 0 0 48px rgba(124,58,237,0.2); }
+}
+
+/* ── Page transitions ───────────────────────────────────────────────────── */
+.fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* ── Selection ──────────────────────────────────────────────────────────── */
+::selection {
+  background: var(--accent-glow);
+  color: white;
+}

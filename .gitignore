@@ -1,0 +1,24 @@
+# Media and cache
+media/
+logs/
+auth.sqlite3
+.env
+backend/.env
+
+# Python build/cache
+__pycache__/
+*.pyc
+backend/__pycache__/
+backend/.tmp-cache/
+backend/.tmp-logs/
+backend/.tmp-media/
+
+# Node modules / build
+node_modules/
+dist/
+dist-ssr
+frontend/node_modules/
+frontend/dist/
+
+# OS files
+.DS_Store

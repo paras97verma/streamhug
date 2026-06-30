@@ -1,0 +1,26 @@
+# ── Docker Ignore Configuration ────────────────────────────────────────────────
+
+# Exclude media and logs from image builds
+media/
+logs/
+
+# Exclude python venv and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.git/
+.DS_Store
+
+# Exclude frontend node modules and build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.cache/
+frontend/tsconfig.tsbuildinfo
+node_modules/
+dist/
