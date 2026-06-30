@@ -496,7 +496,7 @@ class HLSService:
             "-hls_fmp4_init_filename", "init.mp4",
             "-hls_flags", "temp_file",
             "-hls_segment_filename", str(audio_dir / "segment_%03d.m4s"),
-            str(audio_dir / "playlist.m3u8"),
+            str(audio_dir / "ffmpeg_dummy.m3u8"),
         ]
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -544,17 +544,29 @@ class HLSService:
         if start_segment > 0:
             # Use -ss BEFORE -i for fast seeking (input seeking)
             cmd.extend(["-ss", str(start_segment * self._settings.hls_segment_duration)])
+        audio_tracks = await self._detect_audio_tracks(source_path)
+        has_multi_audio = len(audio_tracks) > 1
+
         cmd.extend([
             "-i", str(source_path),
+            "-copyts",
+            "-avoid_negative_ts", "disabled",
             *video_encoder,
             "-map", "0:v:0",
-            "-map", "0:a:0?",
-            "-c:a", "aac",
-            "-ac", "2",
+        ])
+
+        if not has_multi_audio:
+            cmd.extend([
+                "-map", "0:a:0?",
+                "-c:a", "aac",
+                "-ac", "2",
+                "-b:a", preset.audio_bitrate,
+            ])
+
+        cmd.extend([
             "-b:v", preset.video_bitrate,
             "-maxrate", preset.video_bitrate,
             "-bufsize", f"{int(preset.video_bitrate[:-1]) * 2}k",
-            "-b:a", preset.audio_bitrate,
             "-vf", f"scale=-2:{preset.height}",
             "-f", "hls",
             "-hls_time", str(self._settings.hls_segment_duration),
@@ -572,7 +584,9 @@ class HLSService:
                 "-hls_segment_type", "fmp4",
                 "-hls_fmp4_init_filename", "init.mp4",
             ])
-        cmd.extend(["-hls_segment_filename", segment_pattern, str(playlist_path)])
+            
+        dummy_playlist = quality_dir / f"dummy_playlist_{start_segment}.m3u8"
+        cmd.extend(["-hls_segment_filename", segment_pattern, str(dummy_playlist)])
 
         _ffmpeg_logger.debug("Generating HLS %s: %s", preset.name, " ".join(cmd))
         async with self._semaphore:
@@ -590,7 +604,7 @@ class HLSService:
             logger.error("FFmpeg variant transcode failed. Stderr output:\n%s", err_msg)
             raise RuntimeError(err_msg[-500:])
 
-        self._normalize_variant_playlist(playlist_path)
+        dummy_playlist.unlink(missing_ok=True)
         if start_segment == 0:
             (quality_dir / ".complete").write_text("done", encoding="utf-8")
         if self._metrics is not None:
@@ -605,15 +619,7 @@ class HLSService:
         preset: QualityPreset,
         segment: str,
     ) -> None:
-        if not segment.startswith("segment_"):
-            return
-        requested_index = self._segment_index(segment)
-        if requested_index < 0:
-            return
-        # Enqueue from start if not complete
-        quality_dir = path_utils.hls_quality_dir(self._settings, media_id, preset.name)
-        if not (quality_dir / ".complete").is_file():
-            await self._enqueue_video_job(media_id, source_path, preset)
+        pass
 
     # ── Audio Track Detection ───────────────────────────────────────────
 
