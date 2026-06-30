@@ -16,6 +16,8 @@
       playsinline
       @canplay="onCanPlay"
       @timeupdate="onTimeUpdate"
+      @seeking="onSeeking"
+      @seeked="onSeeked"
       @waiting="onWaiting"
       @playing="onPlaying"
       @click.stop="togglePlay"
@@ -238,7 +240,7 @@ const props = defineProps<{
   initialSubtitleTracks?: any[];
 }>();
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
+const API_URL = import.meta.env.VITE_API_URL || '/api/v1';
 
 const router = useRouter();
 const continueWatchingStore = useContinueWatchingStore();
@@ -336,15 +338,20 @@ const showQualityMenu = ref(false);
 // Audio & subtitle track state
 const audioTracks = ref<any[]>(props.initialAudioTracks ?? []);
 const subtitleTracks = ref<any[]>(props.initialSubtitleTracks ?? []);
+const metadataAudioTracks = ref<any[]>(props.initialAudioTracks ?? []);
 const currentAudioTrack = ref<number>(-1);
 const currentSubtitleTrack = ref<number>(-1);
 
 watch(() => props.initialAudioTracks, (newVal) => {
   if (newVal && newVal.length > 0) {
-    audioTracks.value = newVal;
-    if (currentAudioTrack.value === -1) {
-      const defaultTrack = newVal.find(t => t.index === 0) || newVal[0];
-      currentAudioTrack.value = defaultTrack ? defaultTrack.index : -1;
+    metadataAudioTracks.value = newVal;
+    if (hls?.audioTracks?.length) {
+      syncHlsAudioTracks();
+    } else {
+      audioTracks.value = newVal;
+      if (currentAudioTrack.value === -1) {
+        currentAudioTrack.value = 0;
+      }
     }
   }
 }, { immediate: true });
@@ -434,8 +441,8 @@ const toggleMute = () => {
 const hlsConfig = () => ({
   startLevel: -1,                   // Adaptive — let ABR pick the best level
   capLevelToPlayerSize: true,
-  maxBufferLength: 10,              // Buffer 10s ahead (reduced from 15s to save bandwidth)
-  maxMaxBufferLength: 20,           // (reduced from 30s)
+  maxBufferLength: 18,              // Enough cushion for unstable mobile networks
+  maxMaxBufferLength: 36,
   maxBufferSize: 30 * 1000 * 1000,  // 30 MB (reduced from 60 MB)
   maxBufferHole: 0.5,               // Allow small buffer gaps
   lowLatencyMode: false,            // VOD, not live
@@ -464,7 +471,7 @@ const setupHlsErrorRecovery = (hlsInstance: Hls) => {
     switch (data.type) {
       case Hls.ErrorTypes.NETWORK_ERROR:
         console.warn('[HLS] Fatal network error — attempting recovery');
-        hlsInstance.startLoad();
+        hlsInstance.startLoad(videoRef.value?.currentTime ?? -1);
         break;
       case Hls.ErrorTypes.MEDIA_ERROR:
         console.warn('[HLS] Fatal media error — attempting recovery');
@@ -477,6 +484,64 @@ const setupHlsErrorRecovery = (hlsInstance: Hls) => {
   });
 };
 
+const parseAudioStreamIndex = (track: any): number | null => {
+  const rawUrl = Array.isArray(track.url) ? track.url[0] : track.url;
+  const match = String(rawUrl || '').match(/audio_(\d+)\//);
+  return match ? Number(match[1]) : null;
+};
+
+const syncHlsAudioTracks = () => {
+  if (!hls) return;
+  const hlsTracks = hls.audioTracks || [];
+  if (hlsTracks.length === 0) return;
+
+  audioTracks.value = hlsTracks.map((track: any, playbackIndex: number) => {
+    const streamIndex = parseAudioStreamIndex(track);
+    const meta = metadataAudioTracks.value.find((item: any) => item.index === streamIndex)
+      || metadataAudioTracks.value[playbackIndex]
+      || {};
+
+    return {
+      index: track.id ?? playbackIndex,
+      playbackIndex: track.id ?? playbackIndex,
+      streamIndex: streamIndex ?? meta.index ?? playbackIndex,
+      title: meta.title || track.name || track.lang || `Track ${playbackIndex + 1}`,
+      language: meta.language || track.lang,
+      codec: meta.codec,
+      channels: meta.channels || Number(track.channels) || 2,
+    };
+  });
+
+  currentAudioTrack.value = hls.audioTrack;
+};
+
+const syncQualityLevels = () => {
+  if (!hls) return;
+  const levels = hls.levels.map((level, idx) => ({
+    index: idx,
+    height: level.height,
+    label: `${level.height}p`,
+    value: level.height.toString()
+  }));
+  levels.sort((a, b) => b.height - a.height);
+  qualityLevels.value = levels;
+};
+
+const registerHlsEvents = (hlsInstance: Hls) => {
+  hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+    videoRef.value?.play().catch(() => {});
+    isPaused.value = false;
+    syncQualityLevels();
+    syncHlsAudioTracks();
+    currentQuality.value = -1;
+  });
+
+  hlsInstance.on(Hls.Events.AUDIO_TRACKS_UPDATED, syncHlsAudioTracks);
+  hlsInstance.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event: any, data: any) => {
+    currentAudioTrack.value = data.id;
+  });
+};
+
 const initPlayer = () => {
   if (!videoRef.value) return;
 
@@ -485,35 +550,10 @@ const initPlayer = () => {
   if (Hls.isSupported()) {
     hls = new Hls(hlsConfig());
     setupHlsErrorRecovery(hls);
+    registerHlsEvents(hls);
 
     hls.loadSource(props.src);
     hls.attachMedia(videoRef.value);
-    
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      videoRef.value?.play().catch(() => {});
-      isPaused.value = false;
-      
-      const levels = hls!.levels.map((level, idx) => ({
-        index: idx,
-        height: level.height,
-        label: `${level.height}p`,
-        value: level.height.toString()
-      }));
-      levels.sort((a, b) => b.height - a.height);
-      qualityLevels.value = levels;
-      currentQuality.value = -1;  // Adaptive
-
-      // Extract Audio Tracks from HLS.js (populated from EXT-X-MEDIA in master)
-      if (hls!.audioTracks && hls!.audioTracks.length > 1) {
-        audioTracks.value = hls!.audioTracks.map((track) => ({
-          index: track.id,
-          title: track.name || track.lang || `Track ${track.id + 1}`,
-          language: track.lang,
-          channels: 2
-        }));
-        currentAudioTrack.value = hls!.audioTrack;
-      }
-    });
 
   } else if (videoRef.value.canPlayType('application/vnd.apple.mpegurl')) {
     videoRef.value.src = props.src;
@@ -555,70 +595,22 @@ const initPlayer = () => {
 
 const changeQuality = (val: any) => {
   if (!videoRef.value) return;
-  const time = videoRef.value.currentTime;
-  const playing = !videoRef.value.paused;
   currentQuality.value = val;
 
   if (isHlsSupported.value && hls) {
-    isLoading.value = true;
-    hls.destroy();
-
-    // Recreate Hls instance with the forced startLevel
-    const config = hlsConfig();
-    config.startLevel = val;
     if (val !== -1) {
-      config.capLevelToPlayerSize = false;
+      hls.config.capLevelToPlayerSize = false;
+      hls.currentLevel = val;
+      hls.nextLevel = val;
+    } else {
+      hls.config.capLevelToPlayerSize = true;
+      hls.currentLevel = -1;
+      hls.nextLevel = -1;
     }
-    hls = new Hls(config);
-    setupHlsErrorRecovery(hls);
-
-    hls.loadSource(props.src);
-    hls.attachMedia(videoRef.value);
-
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      if (videoRef.value) {
-        videoRef.value.currentTime = time;
-        if (playing) {
-          videoRef.value.play().catch(() => {});
-        }
-
-        // Restore active audio track
-        if (currentAudioTrack.value !== -1 && hls && hls.audioTracks && hls.audioTracks.length > 1) {
-          hls.audioTrack = currentAudioTrack.value;
-        }
-
-        // Restore active subtitle track
-        if (currentSubtitleTrack.value !== -1) {
-          const track = subtitleTracks.value.find((t: any) => t.index === currentSubtitleTrack.value);
-          if (track) {
-            changeSubtitleTrack(currentSubtitleTrack.value, track);
-          }
-        }
-      }
-
-      // Re-map qualityLevels and audioTracks
-      if (!hls) return;
-      const levels = hls.levels.map((level, idx) => ({
-        index: idx,
-        height: level.height,
-        label: `${level.height}p`,
-        value: level.height.toString()
-      }));
-      levels.sort((a, b) => b.height - a.height);
-      qualityLevels.value = levels;
-
-      if (hls.audioTracks && hls.audioTracks.length > 1) {
-        audioTracks.value = hls.audioTracks.map((track) => ({
-          index: track.id,
-          title: track.name || track.lang || `Track ${track.id + 1}`,
-          language: track.lang,
-          channels: 2
-        }));
-        currentAudioTrack.value = hls.audioTrack;
-      }
-    });
 
   } else {
+    const time = videoRef.value.currentTime;
+    const playing = !videoRef.value.paused;
     let newSrc = props.src;
     if (val !== 'auto') {
       newSrc = props.src.replace('master.m3u8', `${val}/playlist.m3u8`);
@@ -633,20 +625,19 @@ const changeQuality = (val: any) => {
 
 const changeAudioTrack = (track: any) => {
   if (!videoRef.value) return;
-  currentAudioTrack.value = track.index;
+  const playbackIndex = track.playbackIndex ?? track.index;
+  currentAudioTrack.value = playbackIndex;
 
   if (isHlsSupported.value && hls) {
-    // Switch audio instantly and natively in Hls.js
-    hls.audioTrack = track.index;
-    console.log("Hls.js switched audio track to index:", track.index);
+    hls.audioTrack = playbackIndex;
+    hls.startLoad(videoRef.value.currentTime);
   } else {
     // Native HTML5 audio track switching (Safari / iOS)
     const nativeAudioTracks = (videoRef.value as any).audioTracks;
     if (nativeAudioTracks) {
       for (let i = 0; i < nativeAudioTracks.length; i++) {
-        nativeAudioTracks[i].enabled = (i === track.index);
+        nativeAudioTracks[i].enabled = (i === playbackIndex);
       }
-      console.log("Native Safari switched audio track to index:", track.index);
     }
   }
   closeAllMenus();
@@ -656,7 +647,10 @@ const changeSubtitleTrack = (trackIndex: number, track: any | null) => {
   if (!videoRef.value) return;
   currentSubtitleTrack.value = trackIndex;
 
-  // Remove all existing <track> elements
+  for (let i = 0; i < videoRef.value.textTracks.length; i++) {
+    videoRef.value.textTracks[i].mode = 'disabled';
+  }
+
   const existingTracks = videoRef.value.querySelectorAll('track');
   existingTracks.forEach(t => t.remove());
 
@@ -665,23 +659,20 @@ const changeSubtitleTrack = (trackIndex: number, track: any | null) => {
     trackEl.kind = 'subtitles';
     trackEl.label = track.title || track.language || `Sub ${trackIndex + 1}`;
     trackEl.srclang = track.language || 'und';
-    trackEl.src = `${BASE_URL}/api/v1/stream/${props.mediaId}/subtitle/${track.index}.vtt`;
+    trackEl.src = `${API_URL}/stream/${props.mediaId}/subtitle/${track.index}.vtt`;
     trackEl.default = true;
-    
-    trackEl.onload = () => {
+
+    const showNewestTrack = () => {
       if (videoRef.value && videoRef.value.textTracks.length > 0) {
         for (let i = 0; i < videoRef.value.textTracks.length; i++) {
-          videoRef.value.textTracks[i].mode = 'showing';
+          videoRef.value.textTracks[i].mode = i === videoRef.value.textTracks.length - 1 ? 'showing' : 'disabled';
         }
       }
     };
 
+    trackEl.addEventListener('load', showNewestTrack, { once: true });
     videoRef.value.appendChild(trackEl);
-    
-    // Fallback immediate mode trigger
-    if (videoRef.value.textTracks.length > 0) {
-      videoRef.value.textTracks[videoRef.value.textTracks.length - 1].mode = 'showing';
-    }
+    requestAnimationFrame(showNewestTrack);
   }
   closeAllMenus();
 };
@@ -726,6 +717,8 @@ const updateBuffer = () => {
 
 const onWaiting = () => { isLoading.value = true; };
 const onPlaying = () => { isLoading.value = false; isPaused.value = false; };
+const onSeeking = () => { isLoading.value = true; };
+const onSeeked = () => { isSeeking.value = false; updateBuffer(); };
 
 const togglePlay = () => {
   if (!videoRef.value) return;
@@ -752,10 +745,19 @@ const onSeekInput = (e: Event) => {
 const onSeekChange = (e: Event) => {
   if (videoRef.value) {
     const val = parseFloat((e.target as HTMLInputElement).value);
-    videoRef.value.currentTime = val;
-    currentTime.value = val;
+    seekTo(val);
   }
-  isSeeking.value = false;
+};
+
+const seekTo = (targetTime: number) => {
+  if (!videoRef.value) return;
+  const boundedTime = Math.min(Math.max(targetTime, 0), duration.value || targetTime);
+  videoRef.value.currentTime = boundedTime;
+  currentTime.value = boundedTime;
+  isLoading.value = true;
+  if (isHlsSupported.value && hls) {
+    hls.startLoad(boundedTime);
+  }
 };
 
 const skip = (seconds: number) => {
@@ -763,8 +765,7 @@ const skip = (seconds: number) => {
     let targetTime = videoRef.value.currentTime + seconds;
     if (targetTime < 0) targetTime = 0;
     if (targetTime > duration.value) targetTime = duration.value;
-    videoRef.value.currentTime = targetTime;
-    currentTime.value = targetTime;
+    seekTo(targetTime);
   }
   triggerShowControls();
 };

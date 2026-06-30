@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import shutil
 import sys
 import time
@@ -78,6 +79,39 @@ class HLSService:
         self._shutdown = False
         self._cleanup_stale_caches()
         self._start_workers()
+
+    _LANGUAGE_LABELS = {
+        "eng": "English",
+        "en": "English",
+        "hin": "Hindi",
+        "hi": "Hindi",
+        "spa": "Spanish",
+        "es": "Spanish",
+        "fra": "French",
+        "fre": "French",
+        "fr": "French",
+        "deu": "German",
+        "ger": "German",
+        "de": "German",
+        "jpn": "Japanese",
+        "ja": "Japanese",
+        "kor": "Korean",
+        "ko": "Korean",
+        "zho": "Chinese",
+        "chi": "Chinese",
+        "zh": "Chinese",
+        "rus": "Russian",
+        "ru": "Russian",
+        "por": "Portuguese",
+        "pt": "Portuguese",
+        "ita": "Italian",
+        "it": "Italian",
+    }
+
+    _SPAM_TITLE_RE = re.compile(
+        r"[\[\(]?\b[\w-]+\.(?:vip|com|org|net|me|to|pw)\b[\]\)]?",
+        re.IGNORECASE,
+    )
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -204,16 +238,15 @@ class HLSService:
         # Always enqueue the audio extraction job if not complete
         complete_marker = audio_dir / ".complete"
         if not complete_marker.is_file():
-            task_key = f"{media_id}:audio:{track_index}"
+            request = TranscodeRequest(
+                media_id=media_id,
+                source_path=source_path,
+                preset=QUALITY_PRESETS[self._settings.hls_default_quality],
+                kind=f"audio:{track_index}",
+            )
+            task_key = self._task_key(request)
             if task_key not in self._queued_keys and task_key not in self._active_tasks:
-                await self._job_queue.put(
-                    TranscodeRequest(
-                        media_id=media_id,
-                        source_path=source_path,
-                        preset=QUALITY_PRESETS[self._settings.hls_default_quality],
-                        kind=f"audio:{track_index}",
-                    )
-                )
+                await self._job_queue.put(request)
                 self._queued_keys.add(task_key)
 
         # If we already have an estimated playlist, return it immediately
@@ -238,6 +271,22 @@ class HLSService:
 
         if source_path is not None:
             await self.get_audio_track_playlist(media_id, source_path, track_index)
+
+            seg_index = self._segment_index(segment)
+            if seg_index >= 0:
+                await self._cancel_distant_transcodes(media_id, f"audio:{track_index}", seg_index)
+                task_key = f"{media_id}:audio:{track_index}:{seg_index}"
+                if task_key not in self._queued_keys and task_key not in self._active_tasks:
+                    request = TranscodeRequest(
+                        media_id=media_id,
+                        source_path=source_path,
+                        preset=QUALITY_PRESETS[self._settings.hls_default_quality],
+                        kind=f"audio:{track_index}",
+                        start_segment=seg_index,
+                    )
+                    await self._job_queue.put(request)
+                    self._queued_keys.add(task_key)
+
             for _ in range(240):  # 60 seconds
                 if target.is_file():
                     return target
@@ -344,7 +393,7 @@ class HLSService:
             try:
                 if request.kind.startswith("audio:"):
                     track_index = int(request.kind.split(":")[1])
-                    await self._generate_audio_track(request.media_id, request.source_path, track_index)
+                    await self._generate_audio_track(request.media_id, request.source_path, track_index, request.start_segment)
                 else:
                     await self._generate_variant(request.media_id, request.source_path, request.preset, request.start_segment)
                 await self._emit_queue_status()
@@ -366,9 +415,10 @@ class HLSService:
         from *target_segment* for the same media, OR that are for a different quality,
         OR that are for a completely different media item (to free global resources)."""
         prefix = f"{media_id}:"
-        seg_duration = self._settings.hls_segment_duration
-        # Consider "close" as within 30 segments (~2 min of content)
-        close_threshold = 30
+        # A large window makes random seeks wait for an old sequential transcode.
+        # Keep nearby work, but prioritize the user's current position.
+        close_threshold = max(4, self._settings.hls_prefetch_segments * 2)
+        requested_family = "audio" if quality.startswith("audio:") else "video"
 
         keys_to_cancel: list[str] = []
         for key, process in list(self._active_processes.items()):
@@ -380,22 +430,17 @@ class HLSService:
                 logger.info("Killed transcode for different media %s to free resources", key)
                 continue
 
-            parts = key.split(":")
-            if len(parts) < 3:
+            parsed = self._parse_task_key(key)
+            if parsed is None:
                 continue
-            try:
-                active_quality = parts[1]
-                active_start = int(parts[2])
-            except ValueError:
-                continue
+            _, active_family, active_quality, active_start = parsed
 
             should_kill = False
-            # Kill if it's a video transcode for a DIFFERENT quality
-            if active_quality != "audio" and active_quality != quality:
-                should_kill = True
-            # Or if it's the SAME quality but far away from the seek point
-            elif target_segment is not None and abs(active_start - target_segment) > close_threshold:
-                should_kill = True
+            if active_family == requested_family:
+                if active_quality != quality:
+                    should_kill = True
+                elif target_segment is not None and abs(active_start - target_segment) > close_threshold:
+                    should_kill = True
 
             if should_kill:
                 keys_to_cancel.append(key)
@@ -421,10 +466,13 @@ class HLSService:
                 if req.media_id != media_id:
                     should_drop = True
                 else:
-                    if req.kind == "video" and req.preset.name != quality:
-                        should_drop = True
-                    elif target_segment is not None and abs(req.start_segment - target_segment) > close_threshold:
-                        should_drop = True
+                    req_family = "audio" if req.kind.startswith("audio:") else "video"
+                    req_quality = req.kind if req_family == "audio" else req.preset.name
+                    if req_family == requested_family:
+                        if req_quality != quality:
+                            should_drop = True
+                        elif target_segment is not None and abs(req.start_segment - target_segment) > close_threshold:
+                            should_drop = True
 
                 if should_drop:
                     self._queued_keys.discard(req_key)
@@ -473,16 +521,22 @@ class HLSService:
 
     # ── Audio Track Generation ──────────────────────────────────────────
 
-    async def _generate_audio_track(self, media_id: str, source_path: Path, track_index: int) -> None:
+    async def _generate_audio_track(self, media_id: str, source_path: Path, track_index: int, start_segment: int = 0) -> None:
         audio_dir = path_utils.hls_media_dir(self._settings, media_id) / f"audio_{track_index}"
         audio_dir.mkdir(parents=True, exist_ok=True)
         complete_marker = audio_dir / ".complete"
-        if complete_marker.is_file():
+        if start_segment == 0 and complete_marker.is_file():
             return
 
         cmd = [
             "ffmpeg", "-y",
+        ]
+        if start_segment > 0:
+            cmd.extend(["-ss", str(start_segment * self._settings.hls_segment_duration)])
+
+        cmd.extend([
             "-i", str(source_path),
+            "-output_ts_offset", str(start_segment * self._settings.hls_segment_duration),
             "-map", f"0:{track_index}",
             "-c:a", "aac",
             "-b:a", "192k",
@@ -493,17 +547,32 @@ class HLSService:
             "-hls_time", str(self._settings.hls_segment_duration),
             "-hls_playlist_type", "vod",
             "-hls_list_size", "0",
-            "-hls_fmp4_init_filename", "init.mp4",
+            "-hls_fmp4_init_filename", f"dummy_init_{start_segment}.mp4" if start_segment > 0 else "init.mp4",
             "-hls_flags", "temp_file",
+        ])
+
+        if start_segment > 0:
+            cmd.extend(["-start_number", str(start_segment)])
+
+        dummy_playlist = audio_dir / f"ffmpeg_dummy_{start_segment}.m3u8"
+        cmd.extend([
             "-hls_segment_filename", str(audio_dir / "segment_%03d.m4s"),
-            str(audio_dir / "ffmpeg_dummy.m3u8"),
-        ]
+            str(dummy_playlist),
+        ])
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        task_key = f"{media_id}:audio:{track_index}"
+        task_key = self._task_key(
+            TranscodeRequest(
+                media_id=media_id,
+                source_path=source_path,
+                preset=QUALITY_PRESETS[self._settings.hls_default_quality],
+                start_segment=start_segment,
+                kind=f"audio:{track_index}",
+            )
+        )
         self._active_processes[task_key] = process
         _, stderr = await process.communicate()
         self._active_processes.pop(task_key, None)
@@ -511,7 +580,10 @@ class HLSService:
             err_msg = stderr.decode(errors="replace").strip()
             logger.error("FFmpeg audio transcode failed. Stderr output:\n%s", err_msg)
             raise RuntimeError(err_msg[-500:])
-        complete_marker.write_text("done", encoding="utf-8")
+
+        dummy_playlist.unlink(missing_ok=True)
+        if start_segment == 0:
+            complete_marker.write_text("done", encoding="utf-8")
 
     # ── Video Variant Generation (Optimised for Speed) ──────────────────
 
@@ -549,8 +621,7 @@ class HLSService:
 
         cmd.extend([
             "-i", str(source_path),
-            "-copyts",
-            "-avoid_negative_ts", "disabled",
+            "-output_ts_offset", str(start_segment * self._settings.hls_segment_duration),
             *video_encoder,
             "-map", "0:v:0",
         ])
@@ -582,7 +653,7 @@ class HLSService:
         if self._settings.hls_use_cmaf:
             cmd.extend([
                 "-hls_segment_type", "fmp4",
-                "-hls_fmp4_init_filename", "init.mp4",
+                "-hls_fmp4_init_filename", f"dummy_init_{start_segment}.mp4" if start_segment > 0 else "init.mp4",
             ])
             
         dummy_playlist = quality_dir / f"dummy_playlist_{start_segment}.m3u8"
@@ -604,7 +675,10 @@ class HLSService:
             logger.error("FFmpeg variant transcode failed. Stderr output:\n%s", err_msg)
             raise RuntimeError(err_msg[-500:])
 
+        dummy_init = quality_dir / f"dummy_init_{start_segment}.mp4"
+        dummy_init.unlink(missing_ok=True)
         dummy_playlist.unlink(missing_ok=True)
+
         if start_segment == 0:
             (quality_dir / ".complete").write_text("done", encoding="utf-8")
         if self._metrics is not None:
@@ -647,11 +721,12 @@ class HLSService:
                 tags = stream.get("tags", {})
                 tracks.append({
                     "index": stream.get("index", 0),
-                    "language": tags.get("language", tags.get("LANGUAGE", "und")),
-                    "title": tags.get("title", tags.get("TITLE", "")),
+                    "language": self._normalize_language(tags.get("language", tags.get("LANGUAGE", "und"))),
+                    "title": self._clean_track_title(tags.get("title", tags.get("TITLE", ""))),
                     "channels": stream.get("channels", 2),
                     "codec": stream.get("codec_name", ""),
                 })
+            self._apply_filename_audio_hints(source_path.name, tracks)
             return tracks
         except (json.JSONDecodeError, KeyError):
             return []
@@ -698,26 +773,16 @@ class HLSService:
         if has_multi_audio:
             # Write EXT-X-MEDIA entries for each audio track
             for i, track in enumerate(audio_tracks):
-                lang = track.get("language", "und")
-                title = track.get("title", "").strip()
-                name_parts = []
-                
-                # Build a descriptive name
-                if title:
-                    name_parts.append(title)
-                elif lang and lang != "und":
-                    name_parts.append(lang.title())
-                else:
-                    name_parts.append(f"Track {i + 1}")
+                lang = self._normalize_language(track.get("language", "und"))
 
                 channels = track.get("channels", 2)
                 ch_str = "6" if channels >= 6 else "2"
-                track_name = " ".join(name_parts)
+                track_name = self._audio_track_name(track, i)
                 is_default = "YES" if i == 0 else "NO"
 
                 lines.append(
                      f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="{audio_group}",'
-                     f'NAME="{track_name}",LANGUAGE="{lang}",'
+                     f'NAME="{self._quote_attr(track_name)}",LANGUAGE="{self._quote_attr(lang)}",'
                      f'DEFAULT={is_default},AUTOSELECT={is_default},'
                      f'CHANNELS="{ch_str}",'
                      f'URI="audio_{track["index"]}/playlist.m3u8"'
@@ -895,9 +960,78 @@ class HLSService:
         return int(suffix) if suffix.isdigit() else 0
 
     def _task_key(self, request: TranscodeRequest) -> str:
-        if request.kind != "video":
-            return f"{request.media_id}:{request.kind}"
+        if request.kind.startswith("audio:"):
+            track_index = request.kind.split(":", 1)[1]
+            return f"{request.media_id}:audio:{track_index}:{request.start_segment}"
         return f"{request.media_id}:{request.preset.name}:{request.start_segment}"
+
+    def _parse_task_key(self, key: str) -> tuple[str, str, str, int] | None:
+        parts = key.split(":")
+        if len(parts) == 3:
+            media_id, quality, start = parts
+            try:
+                return media_id, "video", quality, int(start)
+            except ValueError:
+                return None
+        if len(parts) == 4 and parts[1] == "audio":
+            media_id, _, track_index, start = parts
+            try:
+                return media_id, "audio", f"audio:{track_index}", int(start)
+            except ValueError:
+                return None
+        return None
+
+    @classmethod
+    def _normalize_language(cls, value: Any) -> str:
+        language = str(value or "und").strip().lower()
+        return language if language else "und"
+
+    @classmethod
+    def _language_label(cls, language: str) -> str:
+        normalized = cls._normalize_language(language)
+        return cls._LANGUAGE_LABELS.get(normalized, normalized.upper() if normalized != "und" else "")
+
+    @classmethod
+    def _clean_track_title(cls, value: Any) -> str:
+        title = str(value or "").strip()
+        if not title:
+            return ""
+        title = re.sub(
+            r"^[\w-]+\.(?:vip|com|org|net|me|to|pw)\s*[-_:|]*\s*",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        )
+        title = cls._SPAM_TITLE_RE.sub("", title).strip(" -_[](){}.")
+        return re.sub(r"\s+", " ", title)
+
+    @classmethod
+    def _quote_attr(cls, value: Any) -> str:
+        return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+    @classmethod
+    def _apply_filename_audio_hints(cls, filename: str, tracks: list[dict[str, Any]]) -> None:
+        if len(tracks) < 2:
+            return
+        filename_lower = filename.lower()
+        if "[hindi.english]" in filename_lower or "hindi.english" in filename_lower or "hin.eng" in filename_lower:
+            tracks[0]["language"] = "hin"
+            tracks[1]["language"] = "eng"
+        elif "[english.hindi]" in filename_lower or "english.hindi" in filename_lower or "eng.hin" in filename_lower:
+            tracks[0]["language"] = "eng"
+            tracks[1]["language"] = "hin"
+
+    @classmethod
+    def _audio_track_name(cls, track: dict[str, Any], position: int) -> str:
+        language = cls._language_label(track.get("language", "und"))
+        title = cls._clean_track_title(track.get("title", ""))
+        if language and title and language.lower() != title.lower():
+            return f"{language} ({title})"
+        if language:
+            return language
+        if title:
+            return title
+        return f"Track {position + 1}"
 
     @staticmethod
     def _resolution_for_preset(preset: QualityPreset) -> str:

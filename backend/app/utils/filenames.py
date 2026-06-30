@@ -73,7 +73,8 @@ def clean_title(title: str) -> str:
     
     # 3. Strip common downloader prefixes (case-insensitive)
     prefixes = [
-        r"^ytdown_youtube_", r"^ytdown_", r"^youtube_", r"^ytdl_", r"^ytdlp_", r"^yt_"
+        r"^ytdown_youtube_", r"^ytdown_", r"^youtube_", r"^ytdl_", r"^ytdlp_", r"^yt_",
+        r"^[a-zA-Z0-9-]+\.(vip|com|org|net|me|to|pw)\s*[-_]\s*",  # e.g. MoviezGuru.vip -
     ]
     for pref in prefixes:
         title = re.sub(pref, "", title, flags=re.IGNORECASE)
@@ -154,6 +155,8 @@ def parse_movie_filename(file_path: Path) -> MovieInfo:
         # Split stem at the year match start index
         idx = year_match.start()
         title = stem[:idx]
+        # Strip trailing punctuation that belonged to the year (e.g. left parenthesis, dot)
+        title = re.sub(r"[\(\[\{\.\-\s_]+$", "", title)
         return MovieInfo(title=clean_title(title), year=year)
         
     # Fallback: no year, just clean the stem
