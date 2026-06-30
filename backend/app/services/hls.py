@@ -693,14 +693,14 @@ class HLSService:
             # Write EXT-X-MEDIA entries for each audio track
             for i, track in enumerate(audio_tracks):
                 lang = track.get("language", "und")
+                title = track.get("title", "").strip()
                 name_parts = []
+                
                 # Build a descriptive name
-                if lang and lang != "und":
-                    try:
-                        import locale
-                        name_parts.append(lang.upper())
-                    except Exception:
-                        name_parts.append(lang)
+                if title:
+                    name_parts.append(title)
+                elif lang and lang != "und":
+                    name_parts.append(lang.title())
                 else:
                     name_parts.append(f"Track {i + 1}")
 
